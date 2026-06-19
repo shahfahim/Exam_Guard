@@ -15,6 +15,7 @@
 #define MyAppExeName     "ExamGuard.exe"
 #define MyAppDescription "Lab Exam Integrity Monitor"
 #define MyAppGUID        "7C3E8A92-4F5D-4B1E-9D2A-8F6C3E7A1B45"
+#define MinDiskMB        300
 
 ; ---------------------------------------------------------------------------
 ; [Setup]
@@ -30,45 +31,36 @@ AppSupportURL               = {#MyAppURL}/issues
 AppUpdatesURL               = {#MyAppURL}/releases
 AppCopyright                = Copyright (C) 2024 {#MyAppPublisher}
 
-; Install location
 DefaultDirName              = {autopf}\{#MyAppName}
 DefaultGroupName            = {#MyAppName}
 
-; Uninstaller
 UninstallDisplayIcon        = {app}\{#MyAppExeName}
 UninstallDisplayName        = {#MyAppName} {#MyAppVersion}
 CreateUninstallRegKey       = yes
 
-; Output
 OutputDir                   = Output
 OutputBaseFilename          = ExamGuardSetup_v{#MyAppVersion}
 
-; Visuals
 SetupIconFile               = assets\examguard.ico
 WizardImageFile             = assets\wizard_banner.bmp
 WizardSmallImageFile        = assets\wizard_header.bmp
 WizardStyle                 = modern
 WizardSizePercent           = 120
 
-; License
 LicenseFile                 = assets\license.txt
 
-; Compression
 Compression                 = lzma2/ultra64
 SolidCompression            = yes
 LZMAUseSeparateProcess      = yes
 
-; UAC -- request Administrator elevation
 PrivilegesRequired          = admin
 PrivilegesRequiredOverridesAllowed = dialog
 
-; Platform requirements (enforced further in [Code] section)
 MinVersion                  = 6.1sp1
 ArchitecturesAllowed        = x64compatible
 ArchitecturesInstallIn64BitMode = x64compatible
 UsedUserAreasWarning        = no
 
-; Version info embedded in setup exe
 VersionInfoVersion          = {#MyAppVersion}.0
 VersionInfoCompany          = {#MyAppPublisher}
 VersionInfoDescription      = {#MyAppName} Setup
@@ -76,11 +68,9 @@ VersionInfoProductName      = {#MyAppName}
 VersionInfoProductVersion   = {#MyAppVersion}
 VersionInfoCopyright        = Copyright (C) 2024 {#MyAppPublisher}
 
-; Misc
 AllowNoIcons                = yes
 DisableDirPage              = no
 DisableProgramGroupPage     = no
-ChangesAssociations         = no
 AlwaysShowDirOnReadyPage    = yes
 ShowLanguageDialog          = no
 AppMutex                    = ExamGuard_Running_{#MyAppGUID}
@@ -102,6 +92,7 @@ Name: "desktopicon"; Description: "Create a &Desktop shortcut"; GroupDescription
 ; ---------------------------------------------------------------------------
 [Files]
 Source: "..\dist\ExamGuard\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "prereq\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeeded
 
 ; ---------------------------------------------------------------------------
 ; [Dirs]
@@ -130,50 +121,268 @@ Root: HKLM64; Subkey: "SOFTWARE\{#MyAppPublisher}\{#MyAppName}"; ValueType: stri
 Root: HKLM64; Subkey: "SOFTWARE\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "URL";         ValueData: "{#MyAppURL}"; Flags: uninsdeletevalue
 
 ; ---------------------------------------------------------------------------
-; [Run] -- Post-install actions
+; [Run]
 ; ---------------------------------------------------------------------------
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent unchecked
 
 ; ---------------------------------------------------------------------------
-; [Code] -- Custom Pascal Script
+; [Code]
 ; ---------------------------------------------------------------------------
 [Code]
 
+// Win32 API for disk space check
+function GetDiskFreeSpaceExW(
+  lpDirName              : String;
+  var FreeBytesAvailable : Int64;
+  var TotalBytes         : Int64;
+  var TotalFreeBytes     : Int64
+): Boolean;
+external 'GetDiskFreeSpaceExW@kernel32.dll stdcall';
+
+
+// ---------------------------------------------------------------------------
+// Global state
+// ---------------------------------------------------------------------------
+var
+  RequirementsPage : TWizardPage;
+  ReqMemo          : TNewMemo;
+  ReqAllPassed     : Boolean;
+  g_NeedVCRedist   : Boolean;
+
+
+// ---------------------------------------------------------------------------
+// Dependency detection helpers
+// ---------------------------------------------------------------------------
+
+// Returns True if VC++ 2015-2022 x64 runtime is NOT installed (needs install)
+function VCRedistNeeded(): Boolean;
+var
+  RegVal : Cardinal;
+begin
+  Result := True;
+  if RegQueryDWordValue(HKLM64,
+      'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64',
+      'Installed', RegVal) then
+    if RegVal >= 1 then begin Result := False; Exit; end;
+  if RegQueryDWordValue(HKLM,
+      'SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x64',
+      'Installed', RegVal) then
+    if RegVal >= 1 then Result := False;
+end;
+
+// Returns True if the target drive has at least RequiredMB free
+function HasEnoughDiskSpace(RequiredMB: Integer): Boolean;
+var
+  Free, Total, TotalFree : Int64;
+  Drive                  : String;
+begin
+  Result := True;
+  Drive  := ExtractFileDrive(WizardDirValue) + '\';
+  try
+    if GetDiskFreeSpaceExW(Drive, Free, Total, TotalFree) then
+      Result := (Free >= Int64(RequiredMB) * 1048576);
+  except
+    Result := True;
+  end;
+end;
+
+
+// ---------------------------------------------------------------------------
+// Requirements page content builder
+// ---------------------------------------------------------------------------
+procedure RefreshRequirementsPage();
+var
+  L        : TStrings;
+  HasSpace : Boolean;
+begin
+  L            := ReqMemo.Lines;
+  ReqAllPassed := True;
+
+  L.Clear;
+  L.Add('');
+  L.Add('  Checking your system...');
+  L.Add('');
+  L.Add('  +---------------------------------------------------+');
+  L.Add('  |  #   Requirement                   Status         |');
+  L.Add('  +---------------------------------------------------+');
+
+  // 1. OS (already enforced by InitializeSetup)
+  L.Add('  |  1   Windows 10 / 11 (64-bit)      [ PASS ]       |');
+
+  // 2. Disk space
+  HasSpace := HasEnoughDiskSpace({#MinDiskMB});
+  if HasSpace then
+    L.Add('  |  2   Free disk space ({#MinDiskMB} MB min)     [ PASS ]       |')
+  else
+  begin
+    L.Add('  |  2   Free disk space ({#MinDiskMB} MB min)     [ FAIL ]       |');
+    ReqAllPassed := False;
+  end;
+
+  // 3. VC++ Redistributable
+  g_NeedVCRedist := VCRedistNeeded();
+  if not g_NeedVCRedist then
+    L.Add('  |  3   VC++ 2022 Runtime             [ PASS ]       |')
+  else
+    L.Add('  |  3   VC++ 2022 Runtime             [ AUTO-INST ]  |');
+
+  // 4. Python (bundled)
+  L.Add('  |  4   Python 3 Runtime              [ BUNDLED ]    |');
+
+  // 5. App packages (bundled)
+  L.Add('  |  5   All app packages              [ BUNDLED ]    |');
+
+  L.Add('  +---------------------------------------------------+');
+  L.Add('');
+
+  if not HasSpace then
+  begin
+    L.Add('  FAIL: Drive ' + ExtractFileDrive(WizardDirValue) +
+          ' needs at least {#MinDiskMB} MB free.');
+    L.Add('        Click Back, pick a different install folder, then');
+    L.Add('        come back to this page.');
+    L.Add('');
+  end;
+
+  if g_NeedVCRedist then
+  begin
+    L.Add('  INFO: Visual C++ 2022 Runtime is not installed.');
+    L.Add('        It will be installed SILENTLY when you click Install.');
+    L.Add('        No action required from you.');
+    L.Add('');
+  end;
+
+  if ReqAllPassed then
+    L.Add('  All requirements are met. Click Next to continue.')
+  else
+    L.Add('  ERROR: Please resolve the FAIL items above before continuing.');
+end;
+
+
+// ---------------------------------------------------------------------------
+// Wizard event handlers
+// ---------------------------------------------------------------------------
+
+procedure InitializeWizard();
+begin
+  ReqAllPassed   := True;
+  g_NeedVCRedist := False;
+
+  RequirementsPage := CreateCustomPage(
+    wpLicense,
+    'System Requirements Check',
+    'Setup is checking your system before installing {#MyAppName}.'
+  );
+
+  ReqMemo            := TNewMemo.Create(RequirementsPage);
+  ReqMemo.Parent     := RequirementsPage.Surface;
+  ReqMemo.Left       := 0;
+  ReqMemo.Top        := 0;
+  ReqMemo.Width      := RequirementsPage.SurfaceWidth;
+  ReqMemo.Height     := RequirementsPage.SurfaceHeight;
+  ReqMemo.ScrollBars := ssVertical;
+  ReqMemo.ReadOnly   := True;
+  ReqMemo.WordWrap   := False;
+  ReqMemo.Font.Name  := 'Courier New';
+  ReqMemo.Font.Size  := 9;
+  ReqMemo.Lines.Add('');
+  ReqMemo.Lines.Add('  Waiting to check requirements...');
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = RequirementsPage.ID then
+  begin
+    RefreshRequirementsPage();
+    WizardForm.NextButton.Enabled := ReqAllPassed;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = RequirementsPage.ID) and (not ReqAllPassed) then
+  begin
+    MsgBox(
+      'One or more requirements have not been met.' + #13#10 +
+      'Please click Back, resolve the issue, and try again.',
+      mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+
+// ---------------------------------------------------------------------------
+// PrepareToInstall -- auto-install missing dependencies silently
+// ---------------------------------------------------------------------------
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  VCPath     : String;
+  ResultCode : Integer;
+begin
+  Result       := '';
+  NeedsRestart := False;
+
+  if not g_NeedVCRedist then Exit;
+
+  VCPath := ExpandConstant('{tmp}\vc_redist.x64.exe');
+  if not FileExists(VCPath) then Exit;
+
+  if not Exec(VCPath, '/install /quiet /norestart', '',
+              SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := 'Could not install Visual C++ Redistributable.' + #13#10 +
+              'Download manually: https://aka.ms/vs/17/release/vc_redist.x64.exe' + #13#10 +
+              'Then run this Setup again.';
+    Exit;
+  end;
+
+  case ResultCode of
+    0, 1638 : ;
+    3010    : NeedsRestart := True;
+    1603    : Result := 'Visual C++ installation failed (error 1603). ' +
+                        'Please install it manually and re-run Setup.';
+  end;
+end;
+
+
+// ---------------------------------------------------------------------------
+// Version / duplicate-install helpers
+// ---------------------------------------------------------------------------
+
 function GetInstalledVersion(): String;
 var
-  Reg: String;
+  Reg : String;
 begin
   Result := '';
   RegQueryStringValue(HKLM64,
-    'SOFTWARE\{#MyAppPublisher}\{#MyAppName}',
-    'Version', Reg);
+    'SOFTWARE\{#MyAppPublisher}\{#MyAppName}', 'Version', Reg);
   if Reg = '' then
     RegQueryStringValue(HKLM,
-      'SOFTWARE\{#MyAppPublisher}\{#MyAppName}',
-      'Version', Reg);
+      'SOFTWARE\{#MyAppPublisher}\{#MyAppName}', 'Version', Reg);
   Result := Reg;
 end;
 
 function CompareVersionStrings(V1, V2: String): Integer;
 var
-  N1, N2, P: Integer;
+  N1, N2, P : Integer;
 begin
   Result := 0;
   while (Length(V1) > 0) or (Length(V2) > 0) do
   begin
     P := Pos('.', V1);
     if P > 0 then begin
-      N1 := StrToIntDef(Copy(V1, 1, P - 1), 0);
-      V1 := Copy(V1, P + 1, MaxInt);
+      N1 := StrToIntDef(Copy(V1, 1, P-1), 0);
+      V1 := Copy(V1, P+1, MaxInt);
     end else begin
       N1 := StrToIntDef(V1, 0);
       V1 := '';
     end;
     P := Pos('.', V2);
     if P > 0 then begin
-      N2 := StrToIntDef(Copy(V2, 1, P - 1), 0);
-      V2 := Copy(V2, P + 1, MaxInt);
+      N2 := StrToIntDef(Copy(V2, 1, P-1), 0);
+      V2 := Copy(V2, P+1, MaxInt);
     end else begin
       N2 := StrToIntDef(V2, 0);
       V2 := '';
@@ -185,80 +394,58 @@ end;
 
 function InitializeSetup(): Boolean;
 var
-  InstalledVer, Msg: String;
-  Cmp: Integer;
+  InstalledVer, Msg : String;
+  Cmp               : Integer;
 begin
   Result := True;
 
-  // Require 64-bit Windows 10+
   if not IsWin64 then
   begin
-    MsgBox(
-      '{#MyAppName} requires a 64-bit version of Windows 10 or later.' + #13#10 +
-      'Your system does not meet this requirement.',
-      mbError, MB_OK);
-    Result := False;
-    Exit;
+    MsgBox('{#MyAppName} requires Windows 10 (64-bit) or later.',
+           mbError, MB_OK);
+    Result := False; Exit;
   end;
 
-  // Check Windows 10 minimum (build 10240)
-  if not (GetWindowsVersion >= $0A000000) then
+  if GetWindowsVersion() < $0A000000 then
   begin
-    MsgBox(
-      '{#MyAppName} requires Windows 10 or later.' + #13#10 +
-      'Please upgrade your operating system.',
-      mbError, MB_OK);
-    Result := False;
-    Exit;
+    MsgBox('{#MyAppName} requires Windows 10 or later.',
+           mbError, MB_OK);
+    Result := False; Exit;
   end;
 
-  // Duplicate / downgrade guard
   InstalledVer := GetInstalledVersion();
   if InstalledVer <> '' then
   begin
     Cmp := CompareVersionStrings(InstalledVer, '{#MyAppVersion}');
     if Cmp > 0 then
     begin
-      Msg := 'A newer version of {#MyAppName} (' + InstalledVer + ') is already installed.' + #13#10 +
-             'Installing version {#MyAppVersion} will downgrade it.' + #13#10 + #13#10 +
-             'Do you want to continue?';
+      Msg := 'A newer version (' + InstalledVer + ') is already installed.' + #13#10 +
+             'Downgrade to {#MyAppVersion}?';
       if MsgBox(Msg, mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDNO then
-      begin
-        Result := False;
-        Exit;
-      end;
+      begin Result := False; Exit; end;
     end
     else if Cmp = 0 then
     begin
       Msg := '{#MyAppName} {#MyAppVersion} is already installed.' + #13#10 +
-             'Do you want to repair or reinstall it?';
+             'Reinstall it?';
       if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDNO then
-      begin
-        Result := False;
-        Exit;
-      end;
+      begin Result := False; Exit; end;
     end;
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  AppDataPath: String;
+  DataPath : String;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    AppDataPath := ExpandConstant('{userappdata}\{#MyAppName}');
-    if DirExists(AppDataPath) then
-    begin
+    DataPath := ExpandConstant('{userappdata}\{#MyAppName}');
+    if DirExists(DataPath) then
       if MsgBox(
-        'Do you want to remove {#MyAppName} user data?' + #13#10 +
-        '(database, screenshots, logs)' + #13#10 + #13#10 +
-        'Location: ' + AppDataPath + #13#10 + #13#10 +
-        'Click Yes to delete all records, or No to keep them.',
+        'Remove {#MyAppName} user data (database, screenshots, logs)?' + #13#10 + #13#10 +
+        'Location: ' + DataPath,
         mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
-      begin
-        DelTree(AppDataPath, True, True, True);
-      end;
-    end;
+        DelTree(DataPath, True, True, True);
   end;
 end;

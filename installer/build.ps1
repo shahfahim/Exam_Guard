@@ -208,6 +208,33 @@ if (-not (Test-Path $icoPath)) {
 Write-OK "Icon ready : $icoPath"
 
 # ---------------------------------------------------------------------------
+# Step 4.5: Download Microsoft Visual C++ Redistributable (prereq)
+# ---------------------------------------------------------------------------
+Write-Step "Preparing prerequisites (VC++ Redistributable)..."
+$prereqDir    = Join-Path $ScriptDir "prereq"
+$vcRedistPath = Join-Path $prereqDir "vc_redist.x64.exe"
+New-Item -ItemType Directory -Force -Path $prereqDir | Out-Null
+
+if (Test-Path $vcRedistPath) {
+    $vcSizeMB = [Math]::Round((Get-Item $vcRedistPath).Length / 1MB, 1)
+    Write-OK "VC++ Redist already cached [$vcSizeMB MB] - skipping download"
+} else {
+    Write-Host "     ...  Downloading Microsoft Visual C++ Redistributable 2022 x64..." -ForegroundColor Cyan
+    $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($vcUrl, $vcRedistPath)
+        $vcSizeMB = [Math]::Round((Get-Item $vcRedistPath).Length / 1MB, 1)
+        Write-OK "VC++ Redist downloaded [$vcSizeMB MB]"
+    } catch {
+        Write-WARN "Could not download VC++ Redist: $($_.Exception.Message)"
+        Write-WARN "Installer will still work but VC++ will not be auto-installed on target PCs."
+        Write-WARN "To fix: manually place vc_redist.x64.exe in: $prereqDir"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Step 5: Build with PyInstaller
 # ---------------------------------------------------------------------------
 if (-not $SkipPyInstaller) {
