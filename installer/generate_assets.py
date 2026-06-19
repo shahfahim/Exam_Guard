@@ -1,19 +1,23 @@
-# installer/generate_assets.py — ExamGuard Installer Asset Generator
+# installer/generate_assets.py -- ExamGuard Installer Asset Generator
 #
 # Generates all installer graphics programmatically using Pillow.
 # Run this BEFORE building with PyInstaller + Inno Setup.
 #
 # Outputs:
-#   installer/assets/examguard.ico       — Multi-size Windows icon
-#   installer/assets/wizard_banner.bmp   — Inno Setup left-panel image (164×314)
-#   installer/assets/wizard_header.bmp   — Inno Setup inner-page header (55×55)
+#   installer/assets/examguard.ico       -- Multi-size Windows icon
+#   installer/assets/wizard_banner.bmp   -- Inno Setup left-panel (164x314)
+#   installer/assets/wizard_header.bmp   -- Inno Setup header (55x55)
 #
 # Usage:
 #   python installer/generate_assets.py
 
 import os
 import sys
-import math
+
+# Force UTF-8 output so Unicode characters don't crash on cp1252 consoles
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+os.environ.setdefault('PYTHONUTF8', '1')
 
 # ── Ensure Pillow is available ────────────────────────────────────────────────
 try:
@@ -202,12 +206,12 @@ def generate_ico():
         sizes=[(s, s) for s in sizes],
         append_images=frames[1:],
     )
-    print(f"  ✓  Saved: {ICO_PATH}")
+    print("  [OK] Saved: " + ICO_PATH)
 
-    # Also save a 256px PNG for reference / taskbar
+    # Also save a 256px PNG for reference
     png_path = os.path.join(ASSETS_DIR, "examguard_256.png")
     frames[-1].save(png_path, format="PNG")
-    print(f"  ✓  Saved: {png_path}")
+    print("  [OK] Saved: " + png_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,10 +268,10 @@ def generate_banner():
         font_feat = ImageFont.load_default()
 
     features = [
-        "✓  Exam integrity",
-        "✓  Live monitoring",
-        "✓  Risk scoring",
-        "✓  Local data only",
+        "-  Exam integrity",
+        "-  Live monitoring",
+        "-  Risk scoring",
+        "-  Local data only",
     ]
     for i, feat in enumerate(features):
         draw.text((18, 192 + i * 16), feat, font=font_feat, fill=MUTED)
@@ -284,7 +288,7 @@ def generate_banner():
     draw.text(((W - vw) // 2, H - 20), ver_text, font=font_ver, fill=INDIGO)
 
     img.save(BANNER_PATH, format="BMP")
-    print(f"  ✓  Saved: {BANNER_PATH}")
+    print("  [OK] Saved: " + BANNER_PATH)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,25 +306,31 @@ def generate_header():
     img.paste(shield_rgb, ((W - 44) // 2, (H - 44) // 2))
 
     img.save(HEADER_PATH, format="BMP")
-    print(f"  ✓  Saved: {HEADER_PATH}")
+    print("  [OK] Saved: " + HEADER_PATH)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n[ExamGuard] Generating installer assets...\n")
+    print("")
+    print("[ExamGuard] Generating installer assets...")
+    print("")
 
     print("[1/3] Generating application icon (ICO)...")
     generate_ico()
 
-    print("\n[2/3] Generating wizard banner (164×314 BMP)...")
+    print("")
+    print("[2/3] Generating wizard banner (164x314 BMP)...")
     generate_banner()
 
-    print("\n[3/3] Generating wizard header (55×55 BMP)...")
+    print("")
+    print("[3/3] Generating wizard header (55x55 BMP)...")
     generate_header()
 
-    print("\n✓  All assets generated successfully.\n")
-    print(f"    ICO:    {ICO_PATH}")
-    print(f"    Banner: {BANNER_PATH}")
-    print(f"    Header: {HEADER_PATH}")
+    print("")
+    print("[DONE] All assets generated successfully.")
+    print("")
+    print("    ICO    : " + ICO_PATH)
+    print("    Banner : " + BANNER_PATH)
+    print("    Header : " + HEADER_PATH)
