@@ -1,0 +1,167 @@
+# .github/workflows/build.yml
+# ExamGuard — GitHub Actions CI/CD Pipeline
+#
+# Triggers:
+#   - Push to main/master (builds for testing, uploads artifact)
+#   - Tag push v*.*.* (builds + creates GitHub Release with installer attached)
+#   - Pull request (builds only, no publish)
+#   - Manual trigger via "Run workflow" button
+
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 4.1.0)'
+        required: false
+        default: ''
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ExamGuard Installer
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Determine version ─────────────────────────────────────────────────
+      - name: Determine build version
+        id: version
+        shell: pwsh
+        run: |
+          $override = "${{ github.event.inputs.version }}"
+          if ($override -ne "") {
+            $v = $override
+          } elseif ("${{ github.ref }}" -match "refs/tags/v(.+)") {
+            $v = $matches[1]
+          } else {
+            # Read from version.py
+            $content = Get-Content version.py -Raw
+            if ($content -match 'VERSION\s*=\s*"([^"]+)"') {
+              $v = $matches[1]
+            } else {
+              $v = "4.0.0"
+            }
+          }
+          echo "VERSION=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Building version: $v"
+
+      # ── 3. Set up Python ─────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 4. Install Python dependencies ───────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+        shell: pwsh
+
+      # ── 5. Install Inno Setup 6 ──────────────────────────────────────────────
+      - name: Install Inno Setup 6
+        run: choco install innosetup --version 6.3.3 -y --no-progress
+        shell: pwsh
+
+      # ── 6. Generate installer assets ─────────────────────────────────────────
+      - name: Generate installer assets
+        run: python installer/generate_assets.py
+        shell: pwsh
+
+      # ── 7. Build with PyInstaller ─────────────────────────────────────────────
+      - name: Build application bundle (PyInstaller)
+        run: pyinstaller ExamGuard.spec --noconfirm --clean
+        shell: pwsh
+
+      # ── 8. Verify PyInstaller output ──────────────────────────────────────────
+      - name: Verify bundle exists
+        run: |
+          if (-not (Test-Path "dist\ExamGuard\ExamGuard.exe")) {
+            Write-Error "ExamGuard.exe not found in dist\ExamGuard\"
+            exit 1
+          }
+          $size = [Math]::Round((Get-Item "dist\ExamGuard\ExamGuard.exe").Length / 1MB, 1)
+          Write-Host "ExamGuard.exe: $size MB"
+        shell: pwsh
+
+      # ── 9. Build installer with Inno Setup ───────────────────────────────────
+      - name: Build installer (Inno Setup)
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          & $iscc "installer\ExamGuard.iss" /DMyAppVersion="${{ steps.version.outputs.VERSION }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: pwsh
+
+      # ── 10. Verify installer output ───────────────────────────────────────────
+      - name: Verify installer
+        id: installer_info
+        run: |
+          $installer = Get-ChildItem "installer\Output\*.exe" | Select-Object -First 1
+          if (-not $installer) { Write-Error "Installer .exe not found"; exit 1 }
+          $sizeMB = [Math]::Round($installer.Length / 1MB, 1)
+          Write-Host "Installer: $($installer.FullName) ($sizeMB MB)"
+          echo "INSTALLER_PATH=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+          echo "INSTALLER_NAME=$($installer.Name)" >> $env:GITHUB_OUTPUT
+          echo "INSTALLER_SIZE=$sizeMB MB" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      # ── 11. Upload installer as workflow artifact ─────────────────────────────
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExamGuard-Installer-v${{ steps.version.outputs.VERSION }}
+          path: installer/Output/*.exe
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 12. Create GitHub Release (only on version tags) ──────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ExamGuard v${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            installer/Output/*.exe
+          body: |
+            ## ExamGuard v${{ steps.version.outputs.VERSION }}
+
+            ### Installation
+            1. Download `ExamGuardSetup_v${{ steps.version.outputs.VERSION }}.exe`
+            2. Run it — UAC will prompt for Administrator permission
+            3. Follow the setup wizard
+
+            ### Requirements
+            - Windows 10 (64-bit) or Windows 11
+            - No additional software required (Python is bundled)
+
+            ### Installer size
+            ${{ steps.installer_info.outputs.INSTALLER_SIZE }}
+
+            ---
+            *Automatically built by GitHub Actions*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

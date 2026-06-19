@@ -1,0 +1,85 @@
+# .gitignore — ExamGuard
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+develop-eggs/
+parts/
+sdist/
+var/
+wheels/
+*.so
+
+# ── Virtual Environments ──────────────────────────────────────────────────────
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ── PyInstaller ───────────────────────────────────────────────────────────────
+# Keep ExamGuard.spec — it is part of the project
+*.spec.bak
+build/
+dist/
+
+# ── Inno Setup Output ─────────────────────────────────────────────────────────
+installer/Output/
+installer/prereq/*.exe
+
+# ── ExamGuard User Data (NEVER commit these) ──────────────────────────────────
+examguard.db
+screenshots/
+.vault/
+recovered/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.vs/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.py
+.env.local
+
+# ── Temp ──────────────────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.swp
+*~
+task.md
