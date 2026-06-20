@@ -1,336 +1,299 @@
-# installer/generate_assets.py -- ExamGuard Installer Asset Generator
-#
-# Generates all installer graphics programmatically using Pillow.
-# Run this BEFORE building with PyInstaller + Inno Setup.
-#
-# Outputs:
-#   installer/assets/examguard.ico       -- Multi-size Windows icon
-#   installer/assets/wizard_banner.bmp   -- Inno Setup left-panel (164x314)
-#   installer/assets/wizard_header.bmp   -- Inno Setup header (55x55)
-#
-# Usage:
-#   python installer/generate_assets.py
+"""
+ExamGuard Installer Asset Generator
+====================================
+Generates all bitmap/icon assets required by Inno Setup from a source PNG.
+
+Outputs
+-------
+  installer/assets/examguard.ico        -- Multi-size Windows icon (16->256)
+  installer/assets/examguard_256.png    -- 256px PNG (for reference)
+  installer/assets/wizard_banner.bmp    -- 164x314 sidebar banner
+  installer/assets/wizard_header.bmp    -- 55x55 header badge
+
+Source
+------
+  installer/assets/source_icon.png      -- High-res source icon (1024x1024)
+  If the source PNG is missing, a geometric fallback is drawn with Pillow.
+"""
 
 import os
 import sys
+import math
 
-# Force UTF-8 output so Unicode characters don't crash on cp1252 consoles
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-os.environ.setdefault('PYTHONUTF8', '1')
+# ---------------------------------------------------------------------------
+# Force UTF-8 output so no UnicodeEncodeError on Windows cp1252 consoles
+# ---------------------------------------------------------------------------
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# ── Ensure Pillow is available ────────────────────────────────────────────────
-try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
-except ImportError:
-    print("Installing Pillow...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pillow", "-q"])
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR  = os.path.join(SCRIPT_DIR, "assets")
+SOURCE_PNG  = os.path.join(ASSETS_DIR, "source_icon.png")
+ICO_PATH    = os.path.join(ASSETS_DIR, "examguard.ico")
+PNG256_PATH = os.path.join(ASSETS_DIR, "examguard_256.png")
+BANNER_PATH = os.path.join(ASSETS_DIR, "wizard_banner.bmp")
+HEADER_PATH = os.path.join(ASSETS_DIR, "wizard_header.bmp")
+
 os.makedirs(ASSETS_DIR, exist_ok=True)
 
-ICO_PATH     = os.path.join(ASSETS_DIR, "examguard.ico")
-BANNER_PATH  = os.path.join(ASSETS_DIR, "wizard_banner.bmp")
-HEADER_PATH  = os.path.join(ASSETS_DIR, "wizard_header.bmp")
-
-# ── Brand Colors ──────────────────────────────────────────────────────────────
-BG_DARK     = (11,  13,  20)      # #0B0D14
-BG_MID      = (13,  15,  24)      # #0D0F18
-INDIGO      = (91,  94,  232)     # #5B5EE8  (accent)
-INDIGO_DEEP = (61,  63,  170)     # #3D3FAA
-INDIGO_GLOW = (139, 143, 255)     # #8B8FFF
-WHITE       = (241, 245, 249)     # #F1F5F9
-MUTED       = (100, 116, 139)     # #64748B
+# ---------------------------------------------------------------------------
+# Brand colors
+# ---------------------------------------------------------------------------
+C_BG_DARK   = (6,  11,  28)     # #060B1C  deep navy
+C_BG_MID    = (13, 27,  62)     # #0D1B3E  navy
+C_BLUE      = (21, 101, 192)    # #1565C0  cobalt
+C_CYAN      = (0,  229, 255)    # #00E5FF  electric cyan
+C_WHITE     = (255, 255, 255)
+C_DIVIDER   = (30, 60, 120)     # subtle blue line
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Shield drawing helper
-# ─────────────────────────────────────────────────────────────────────────────
-def draw_shield(draw: ImageDraw.ImageDraw, cx: float, cy: float,
-                size: float, fill, outline, outline_width: int = 2):
+# ===========================================================================
+# SOURCE ICON LOADER
+# ===========================================================================
+
+def load_source_icon(size: int) -> Image.Image:
     """
-    Draw a classic security-shield polygon centered at (cx, cy).
-    `size` is the half-height of the shield.
+    Load the high-res source PNG and resize to `size`x`size` with LANCZOS
+    anti-aliasing for perfect sharpness at any size.
+    Falls back to the programmatic shield if source_icon.png is missing.
     """
-    w  = size * 0.72    # half-width
-    h  = size           # half-height (top to bottom tip)
-    bh = h * 0.55       # where the straight sides start curving inward
-
-    # Shield points: top-left → top-right → right-straight → bottom-tip → left-straight
-    pts = [
-        (cx - w,  cy - h),          # top-left
-        (cx + w,  cy - h),          # top-right
-        (cx + w,  cy - h + bh),     # right kink
-        (cx,      cy + h),          # bottom tip
-        (cx - w,  cy - h + bh),     # left kink
-    ]
-
-    draw.polygon(pts, fill=fill)
-    if outline_width > 0:
-        draw.polygon(pts, outline=outline)
+    if os.path.exists(SOURCE_PNG):
+        img = Image.open(SOURCE_PNG).convert("RGBA")
+        return img.resize((size, size), Image.LANCZOS)
+    else:
+        print("  [WARN] source_icon.png not found -- using fallback drawing")
+        return _draw_fallback_shield(size)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Eye / lens symbol inside the shield
-# ─────────────────────────────────────────────────────────────────────────────
-def draw_eye(draw: ImageDraw.ImageDraw, cx: float, cy: float,
-             rx: float, ry: float, fill, outline, lw: int = 2):
-    """Draw an almond-shaped eye at (cx, cy)."""
-    # Outer eye shape (two arcs)
-    box = [cx - rx, cy - ry, cx + rx, cy + ry]
-    draw.ellipse(box, fill=fill, outline=outline, width=lw)
-    # Pupil
-    pr = ry * 0.42
-    pbox = [cx - pr, cy - pr, cx + pr, cy + pr]
-    draw.ellipse(pbox, fill=outline)
-    # Highlight dot
-    hr = pr * 0.30
-    hbox = [cx - hr * 0.5 - pr * 0.3, cy - pr * 0.4 - hr,
-            cx - hr * 0.5 - pr * 0.3 + hr * 2, cy - pr * 0.4 + hr]
-    draw.ellipse(hbox, fill=(255, 255, 255, 200))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Render one icon frame at `size` × `size`
-# ─────────────────────────────────────────────────────────────────────────────
-def render_icon_frame(size: int) -> Image.Image:
+def _draw_fallback_shield(size: int) -> Image.Image:
+    """Minimal programmatic fallback shield if no source PNG exists."""
     img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
+    m    = size // 8
 
-    cx, cy  = size / 2, size / 2
-    margin  = size * 0.06
-    shield_h = (size / 2) - margin
+    # Shield body
+    pts = [
+        (m, m), (size - m, m),
+        (size - m, size // 2),
+        (size // 2, size - m),
+        (m, size // 2),
+    ]
+    draw.polygon(pts, fill=(*C_BG_MID, 255))
+    draw.polygon(pts, outline=(*C_CYAN, 220), width=max(1, size // 32))
 
-    # ── Glow layers (soft outer glow) ────────────────────────────────────────
-    for i in range(4, 0, -1):
-        glow_alpha = 30 + i * 12
-        glow_color = (*INDIGO_GLOW, glow_alpha)
-        draw_shield(draw, cx, cy, shield_h + i * (size * 0.015),
-                    fill=(0, 0, 0, 0), outline=glow_color,
-                    outline_width=max(1, int(size * 0.018)))
-
-    # ── Shield gradient body (simulate with layered polys) ───────────────────
-    steps = 20
-    for step in range(steps):
-        t     = step / steps
-        r     = int(INDIGO_DEEP[0] + (INDIGO[0] - INDIGO_DEEP[0]) * t)
-        g_col = int(INDIGO_DEEP[1] + (INDIGO[1] - INDIGO_DEEP[1]) * t)
-        b     = int(INDIGO_DEEP[2] + (INDIGO[2] - INDIGO_DEEP[2]) * t)
-        alpha = 255
-        scale = 1.0 - (step / steps) * 0.0   # full size for body
-        w     = size * 0.36 - step * 0.5
-        h     = shield_h    - step * 0.7
-        bh    = h * 0.55
-        if w <= 0 or h <= 0:
-            break
-        pts = [
-            (cx - w,  cy - h),
-            (cx + w,  cy - h),
-            (cx + w,  cy - h + bh),
-            (cx,      cy + h),
-            (cx - w,  cy - h + bh),
-        ]
-        draw.polygon(pts, fill=(r, g_col, b, alpha))
-
-    # ── Shield bright border ─────────────────────────────────────────────────
-    draw_shield(draw, cx, cy, shield_h,
-                fill=(0, 0, 0, 0), outline=(*INDIGO_GLOW, 210),
-                outline_width=max(1, int(size * 0.025)))
-
-    # ── Eye symbol centred inside shield ─────────────────────────────────────
-    eye_cx = cx
-    eye_cy = cy - shield_h * 0.05
-    eye_rx = shield_h * 0.34
-    eye_ry = shield_h * 0.22
-
-    # Subtle eye glow
-    for i in range(3, 0, -1):
-        draw.ellipse([eye_cx - eye_rx - i*2, eye_cy - eye_ry - i*2,
-                      eye_cx + eye_rx + i*2, eye_cy + eye_ry + i*2],
-                     fill=(*INDIGO_GLOW, 18 * i))
-
-    # Eye body (white)
-    draw.ellipse([eye_cx - eye_rx, eye_cy - eye_ry,
-                  eye_cx + eye_rx, eye_cy + eye_ry],
-                 fill=(*WHITE, 240))
-    # Iris
-    ir = eye_ry * 0.70
-    draw.ellipse([eye_cx - ir, eye_cy - ir, eye_cx + ir, eye_cy + ir],
-                 fill=(*INDIGO, 255))
-    # Pupil
-    pr = ir * 0.45
-    draw.ellipse([eye_cx - pr, eye_cy - pr, eye_cx + pr, eye_cy + pr],
-                 fill=(5, 7, 14, 255))
-    # Specular highlight
-    hr = pr * 0.38
-    draw.ellipse([eye_cx - pr * 0.5 - hr, eye_cy - pr * 0.5 - hr,
-                  eye_cx - pr * 0.5 + hr, eye_cy - pr * 0.5 + hr],
-                 fill=(255, 255, 255, 220))
-
-    # ── Subtle scan-line across the shield (monitoring motif) ────────────────
-    if size >= 48:
-        line_y = eye_cy
-        line_w = max(1, int(size * 0.012))
-        for offset in range(-int(shield_h * 0.55), int(shield_h * 0.55), max(1, int(size*0.04))):
-            alpha = max(0, 30 - abs(offset) // 3)
-            draw.line([(cx - size*0.35, line_y + offset),
-                       (cx + size*0.35, line_y + offset)],
-                      fill=(*INDIGO_GLOW, alpha), width=line_w)
-
-    # Apply subtle blur for smooth anti-aliasing on larger sizes
-    if size >= 64:
-        img = img.filter(ImageFilter.SMOOTH)
-
+    # Eye
+    cx, cy = size // 2, int(size * 0.42)
+    ew, eh = size // 3, size // 6
+    draw.ellipse([cx - ew, cy - eh, cx + ew, cy + eh],
+                 fill=(*C_CYAN, 200))
+    r = size // 10
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r],
+                 fill=(5, 10, 25, 255))
     return img
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Generate multi-size Windows ICO
-# ─────────────────────────────────────────────────────────────────────────────
-def generate_ico():
-    sizes = [16, 24, 32, 48, 64, 128, 256]
-    frames = []
-    for s in sizes:
-        frame = render_icon_frame(s)
-        frames.append(frame)
-        print(f"  Rendered {s}×{s} icon frame")
+# ===========================================================================
+# 1. ICO -- multi-size Windows icon
+# ===========================================================================
 
-    # Save .ico with all sizes
+def generate_ico():
+    print("[1/3] Generating application icon (ICO)...")
+    sizes  = [16, 24, 32, 48, 64, 128, 256]
+    frames = []
+
+    for s in sizes:
+        frame = load_source_icon(s)
+        # For very small sizes apply a very mild sharpening pass
+        if s <= 32:
+            frame = frame.filter(ImageFilter.SHARPEN)
+        frames.append(frame)
+        print(f"  [OK] Rendered {s}x{s}")
+
+    # Save ICO (all sizes packed)
     frames[0].save(
         ICO_PATH,
         format="ICO",
         sizes=[(s, s) for s in sizes],
         append_images=frames[1:],
     )
-    print("  [OK] Saved: " + ICO_PATH)
+    print(f"  [OK] Saved: {ICO_PATH}")
 
-    # Also save a 256px PNG for reference
-    png_path = os.path.join(ASSETS_DIR, "examguard_256.png")
-    frames[-1].save(png_path, format="PNG")
-    print("  [OK] Saved: " + png_path)
+    # Save reference PNG at 256px
+    frames[-1].save(PNG256_PATH, format="PNG")
+    print(f"  [OK] Saved: {PNG256_PATH}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Generate Inno Setup Wizard Banner  (164 × 314 px BMP — left panel)
-# ─────────────────────────────────────────────────────────────────────────────
+# ===========================================================================
+# 2. WIZARD BANNER -- 164x314 sidebar (left panel of the setup wizard)
+# ===========================================================================
+
 def generate_banner():
+    """
+    Produces a sharp, premium 164x314 sidebar banner:
+      - Dark navy gradient background
+      - Centred icon (110x110)
+      - 'ExamGuard' title and subtitle
+      - Bullet feature list
+      - Version string at bottom
+    """
+    print("[2/3] Generating wizard banner (164x314 BMP)...")
     W, H = 164, 314
-    img  = Image.new("RGB", (W, H), BG_DARK)
+    img  = Image.new("RGB", (W, H), C_BG_DARK)
     draw = ImageDraw.Draw(img)
 
-    # Vertical gradient background
+    # --- Background gradient (top navy -> slightly lighter mid) -----------
     for y in range(H):
-        t = y / H
-        r = int(BG_DARK[0] + (BG_MID[0] - BG_DARK[0]) * t)
-        g = int(BG_DARK[1] + (BG_MID[1] - BG_DARK[1]) * t)
-        b = int(BG_DARK[2] + (BG_MID[2] - BG_DARK[2]) * t)
+        t   = y / H
+        r   = int(C_BG_DARK[0] + (C_BG_MID[0] - C_BG_DARK[0]) * t)
+        g   = int(C_BG_DARK[1] + (C_BG_MID[1] - C_BG_DARK[1]) * t)
+        b   = int(C_BG_DARK[2] + (C_BG_MID[2] - C_BG_DARK[2]) * t * 0.6)
         draw.line([(0, y), (W, y)], fill=(r, g, b))
 
-    # Decorative indigo line on right edge
-    for y in range(H):
-        draw.line([(W-2, y), (W-1, y)], fill=INDIGO)
+    # --- Subtle left/right edge cyan accent lines -------------------------
+    draw.line([(0, 0), (0, H)],     fill=(*C_CYAN, 180), width=2)
+    draw.line([(W-1, 0), (W-1, H)], fill=(*C_BLUE, 80),  width=1)
 
-    # Shield icon (centered, upper portion)
-    shield_frame = render_icon_frame(80)
-    shield_rgb   = Image.new("RGB", (80, 80), BG_DARK)
-    shield_rgb.paste(shield_frame, mask=shield_frame.split()[3])
-    img.paste(shield_rgb, ((W - 80) // 2, 48))
+    # --- Icon (110x110, centered horizontally, top area) -----------------
+    icon_size = 110
+    icon_img  = load_source_icon(icon_size).convert("RGBA")
 
-    # "ExamGuard" text
+    # Paste with alpha mask so transparent corners stay clean
+    icon_x = (W - icon_size) // 2
+    icon_y = 18
+    img.paste(icon_img, (icon_x, icon_y), icon_img)
+
+    # --- Thin cyan divider below icon ------------------------------------
+    div_y = icon_y + icon_size + 10
+    draw.line([(14, div_y), (W - 14, div_y)], fill=(*C_CYAN, 160), width=1)
+
+    # --- Title text (drawn pixel-by-pixel without font file dependency) --
+    # We use Pillow's default bitmap font for guaranteed rendering
     try:
-        font_title = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 13)
-        font_sub   = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf",   8)
+        from PIL import ImageFont
+        # Try to load a system font for crisp text
+        font_paths = [
+            "C:/Windows/Fonts/segoeuib.ttf",   # Segoe UI Bold
+            "C:/Windows/Fonts/calibrib.ttf",    # Calibri Bold
+            "C:/Windows/Fonts/arialbd.ttf",     # Arial Bold
+            "C:/Windows/Fonts/arial.ttf",       # Arial
+        ]
+        font_title = None
+        font_sub   = None
+        font_body  = None
+        for fp in font_paths:
+            if os.path.exists(fp):
+                font_title = ImageFont.truetype(fp, 15)
+                font_sub   = ImageFont.truetype(fp, 9)
+                font_body  = ImageFont.truetype(fp, 9)
+                break
+        if font_title is None:
+            font_title = ImageFont.load_default()
+            font_sub   = font_title
+            font_body  = font_title
     except Exception:
+        from PIL import ImageFont
         font_title = ImageFont.load_default()
         font_sub   = font_title
+        font_body  = font_title
 
-    title = "ExamGuard"
-    bbox  = draw.textbbox((0, 0), title, font=font_title)
-    tw    = bbox[2] - bbox[0]
-    draw.text(((W - tw) // 2, 140), title, font=font_title, fill=WHITE)
+    ty = div_y + 10
 
-    sub = "Integrity Monitor"
-    bbox2 = draw.textbbox((0, 0), sub, font=font_sub)
-    sw    = bbox2[2] - bbox2[0]
-    draw.text(((W - sw) // 2, 158), sub, font=font_sub, fill=MUTED)
+    # App name
+    draw.text((W // 2, ty), "ExamGuard",
+              font=font_title, fill=C_WHITE, anchor="mt")
+    ty += 18
 
-    # Horizontal divider
-    draw.line([(16, 178), (W-16, 178)], fill=INDIGO_DEEP, width=1)
+    # Subtitle
+    draw.text((W // 2, ty), "Integrity Monitor",
+              font=font_sub, fill=(*C_CYAN, 200), anchor="mt")
+    ty += 16
+
+    # Second divider
+    draw.line([(14, ty), (W - 14, ty)], fill=C_DIVIDER, width=1)
+    ty += 10
 
     # Feature bullets
-    try:
-        font_feat = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 7)
-    except Exception:
-        font_feat = ImageFont.load_default()
-
     features = [
-        "-  Exam integrity",
-        "-  Live monitoring",
-        "-  Risk scoring",
-        "-  Local data only",
+        "Exam integrity",
+        "Live monitoring",
+        "Risk scoring",
+        "Local data only",
     ]
-    for i, feat in enumerate(features):
-        draw.text((18, 192 + i * 16), feat, font=font_feat, fill=MUTED)
+    for feat in features:
+        draw.text((16, ty), "-  " + feat,
+                  font=font_body, fill=(180, 200, 240), anchor="lt")
+        ty += 13
 
     # Version at bottom
-    try:
-        font_ver = ImageFont.truetype("C:/Windows/Fonts/segoeui.ttf", 7)
-    except Exception:
-        font_ver = ImageFont.load_default()
-
-    ver_text = "v4.0.0"
-    bbox3    = draw.textbbox((0, 0), ver_text, font=font_ver)
-    vw       = bbox3[2] - bbox3[0]
-    draw.text(((W - vw) // 2, H - 20), ver_text, font=font_ver, fill=INDIGO)
+    draw.text((W // 2, H - 12), "v4.0.0",
+              font=font_body, fill=(*C_CYAN, 180), anchor="mb")
 
     img.save(BANNER_PATH, format="BMP")
-    print("  [OK] Saved: " + BANNER_PATH)
+    print(f"  [OK] Saved: {BANNER_PATH}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Generate Inno Setup Wizard Header  (55 × 55 px BMP — inner pages top-right)
-# ─────────────────────────────────────────────────────────────────────────────
+# ===========================================================================
+# 3. WIZARD HEADER -- 55x55 badge (top-right on interior wizard pages)
+# ===========================================================================
+
 def generate_header():
+    """
+    55x55 icon badge — just the icon on a dark background, sharp at small size.
+    """
+    print("[3/3] Generating wizard header (55x55 BMP)...")
     W, H = 55, 55
-    img  = Image.new("RGB", (W, H), BG_DARK)
+    img  = Image.new("RGB", (W, H), C_BG_DARK)
     draw = ImageDraw.Draw(img)
 
-    # Small shield centred
-    shield_frame = render_icon_frame(44)
-    shield_rgb   = Image.new("RGB", (44, 44), BG_DARK)
-    shield_rgb.paste(shield_frame, mask=shield_frame.split()[3])
-    img.paste(shield_rgb, ((W - 44) // 2, (H - 44) // 2))
+    # Background gradient
+    for y in range(H):
+        t = y / H
+        r = int(C_BG_DARK[0] + (C_BG_MID[0] - C_BG_DARK[0]) * t)
+        g = int(C_BG_DARK[1] + (C_BG_MID[1] - C_BG_DARK[1]) * t)
+        b = int(C_BG_DARK[2] + (C_BG_MID[2] - C_BG_DARK[2]) * t)
+        draw.line([(0, y), (W, y)], fill=(r, g, b))
+
+    # Icon centred, padded by 4px
+    pad       = 4
+    icon_size = W - pad * 2
+    icon_img  = load_source_icon(icon_size).convert("RGBA")
+    icon_img  = icon_img.filter(ImageFilter.SHARPEN)
+    img.paste(icon_img, (pad, pad), icon_img)
+
+    # Thin cyan border
+    draw.rectangle([0, 0, W - 1, H - 1], outline=(*C_CYAN, 120), width=1)
 
     img.save(HEADER_PATH, format="BMP")
-    print("  [OK] Saved: " + HEADER_PATH)
+    print(f"  [OK] Saved: {HEADER_PATH}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ===========================================================================
+# Entry point
+# ===========================================================================
+
 if __name__ == "__main__":
-    print("")
+    print()
     print("[ExamGuard] Generating installer assets...")
-    print("")
+    if os.path.exists(SOURCE_PNG):
+        print(f"  Using source icon: {SOURCE_PNG}")
+    else:
+        print("  [WARN] No source_icon.png found -- using programmatic fallback")
+    print()
 
-    print("[1/3] Generating application icon (ICO)...")
     generate_ico()
-
-    print("")
-    print("[2/3] Generating wizard banner (164x314 BMP)...")
+    print()
     generate_banner()
-
-    print("")
-    print("[3/3] Generating wizard header (55x55 BMP)...")
+    print()
     generate_header()
 
-    print("")
+    print()
     print("[DONE] All assets generated successfully.")
-    print("")
-    print("    ICO    : " + ICO_PATH)
-    print("    Banner : " + BANNER_PATH)
-    print("    Header : " + HEADER_PATH)
+    print()
+    print(f"    ICO    : {ICO_PATH}")
+    print(f"    Banner : {BANNER_PATH}")
+    print(f"    Header : {HEADER_PATH}")
