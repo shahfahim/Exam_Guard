@@ -56,21 +56,33 @@ COL_DIVIDER   = (25,  60,  120)  # Divider line
 # Helper: load source PNG at a given size (always sharp)
 # ---------------------------------------------------------------------------
 def get_source(size: int) -> Image.Image:
-    """Load the premium source PNG and resize to `size` x `size`.
-    Applies extra sharpening for small sizes so they read clearly
-    in Windows Explorer, taskbar, and desktop shortcuts.
+    """Load the premium source PNG, composite onto a solid blue background
+    (no transparency), resize to `size` x `size` with sharpening for small sizes.
+
+    Why solid background: Windows desktop icons with alpha transparency show the
+    wallpaper through them, making the icon appear invisible on dark desktops.
+    Compositing onto vivid blue ensures the icon is always clearly visible.
     """
     if not os.path.exists(SOURCE_PNG):
         raise FileNotFoundError(
             f"Source icon PNG not found: {SOURCE_PNG}\n"
             "Run build.ps1 which copies it from the project root."
         )
+
     src = Image.open(SOURCE_PNG).convert("RGBA")
 
-    # Resize with LANCZOS (best quality downscaling)
-    img = src.resize((size, size), Image.LANCZOS)
+    # --- Flatten onto solid vivid blue background (no transparency) ---
+    # This is the critical fix: transparent ICO pixels show the wallpaper
+    # through on the desktop, making the icon look invisible on dark themes.
+    ICON_BG = (18, 69, 181)   # Royal blue  #1245B5
+    bg = Image.new("RGB", src.size, ICON_BG)
+    bg.paste(src, mask=src.split()[3])   # alpha channel as mask
+    src_flat = bg.convert("RGBA")        # keep RGBA for ICO format
 
-    # For small sizes, sharpen so details don't blur out
+    # --- Resize with LANCZOS ---
+    img = src_flat.resize((size, size), Image.LANCZOS)
+
+    # --- Sharpening for small sizes ---
     if size <= 32:
         img = img.filter(ImageFilter.UnsharpMask(radius=0.6, percent=160, threshold=2))
         enhancer = ImageEnhance.Contrast(img)
