@@ -20,11 +20,11 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow", "--quiet"])
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -56,14 +56,33 @@ COL_DIVIDER   = (25,  60,  120)  # Divider line
 # Helper: load source PNG at a given size (always sharp)
 # ---------------------------------------------------------------------------
 def get_source(size: int) -> Image.Image:
-    """Load the premium source PNG and resize to `size` x `size` with LANCZOS."""
+    """Load the premium source PNG and resize to `size` x `size`.
+    Applies extra sharpening for small sizes so they read clearly
+    in Windows Explorer, taskbar, and desktop shortcuts.
+    """
     if not os.path.exists(SOURCE_PNG):
         raise FileNotFoundError(
             f"Source icon PNG not found: {SOURCE_PNG}\n"
             "Run build.ps1 which copies it from the project root."
         )
     src = Image.open(SOURCE_PNG).convert("RGBA")
-    return src.resize((size, size), Image.LANCZOS)
+
+    # Resize with LANCZOS (best quality downscaling)
+    img = src.resize((size, size), Image.LANCZOS)
+
+    # For small sizes, sharpen so details don't blur out
+    if size <= 32:
+        img = img.filter(ImageFilter.UnsharpMask(radius=0.6, percent=160, threshold=2))
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.3)
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(2.0)
+    elif size <= 48:
+        img = img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=2))
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(1.5)
+
+    return img
 
 
 # ---------------------------------------------------------------------------
