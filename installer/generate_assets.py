@@ -71,16 +71,8 @@ def get_source(size: int) -> Image.Image:
 
     src = Image.open(SOURCE_PNG).convert("RGBA")
 
-    # --- Flatten onto solid vivid blue background (no transparency) ---
-    # This is the critical fix: transparent ICO pixels show the wallpaper
-    # through on the desktop, making the icon look invisible on dark themes.
-    ICON_BG = (18, 69, 181)   # Royal blue  #1245B5
-    bg = Image.new("RGB", src.size, ICON_BG)
-    bg.paste(src, mask=src.split()[3])   # alpha channel as mask
-    src_flat = bg.convert("RGBA")        # keep RGBA for ICO format
-
     # --- Resize with LANCZOS ---
-    img = src_flat.resize((size, size), Image.LANCZOS)
+    img = src.resize((size, size), Image.LANCZOS)
 
     # --- Sharpening for small sizes ---
     if size <= 32:
@@ -146,7 +138,8 @@ def draw_centered(draw, text, font, canvas_w, y, color):
 # ---------------------------------------------------------------------------
 def generate_ico():
     print("[1/3] Generating application icon (ICO)...")
-    sizes  = [16, 24, 32, 48, 64, 128, 256]
+    # Start from 256px down to 16px so Pillow uses the largest as base
+    sizes  = [256, 128, 64, 48, 32, 24, 16]
     frames = []
 
     for s in sizes:
@@ -158,12 +151,11 @@ def generate_ico():
     frames[0].save(
         ICO_PATH,
         format="ICO",
-        sizes=[(s, s) for s in sizes],
         append_images=frames[1:]
     )
 
     # Save 256px PNG reference
-    frames[-1].save(PNG256_PATH)
+    frames[0].save(PNG256_PATH)
 
     print(f"  [OK] Saved: {ICO_PATH}")
     print(f"  [OK] Saved: {PNG256_PATH}")
