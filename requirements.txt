@@ -7,3 +7,5 @@ cryptography>=41.0.0
 pywin32>=306
 psutil>=5.9.0
 watchdog>=3.0.0
+keyring>=24.0.0
+certifi>=2024.1.1

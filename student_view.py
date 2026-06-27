@@ -326,9 +326,10 @@ class StudentView(ctk.CTkFrame):
 class _InlinePINForm(ctk.CTkFrame):
     def __init__(self, parent, on_success, on_cancel):
         super().__init__(parent, fg_color="transparent")
-        self._on_success = on_success
-        self._on_cancel  = on_cancel
-        self._attempts   = 0
+        self._on_success   = on_success
+        self._on_cancel    = on_cancel
+        self._attempts     = 0
+        self._locked_until = 0.0   # epoch seconds; 0 = not locked
         self._build()
 
     def _build(self):
@@ -340,7 +341,7 @@ class _InlinePINForm(ctk.CTkFrame):
         row.pack(fill="x", pady=(6, 0))
 
         self._pin_var = tk.StringVar()
-        self._entry = ctk.CTkEntry(row, textvariable=self._pin_var, show="●",
+        self._entry = ctk.CTkEntry(row, textvariable=self._pin_var, show="\u25cf",
                                     placeholder_text="PIN", justify="center",
                                     height=38, corner_radius=8, width=140,
                                     font=ctk.CTkFont("Segoe UI", 16),
@@ -354,10 +355,12 @@ class _InlinePINForm(ctk.CTkFrame):
                       fg_color=ACCENT, hover_color=ACCENT_H,
                       command=self._verify).pack(side="left", padx=(0, 4))
 
-        ctk.CTkButton(row, text="Cancel", width=70, height=38, corner_radius=8,
-                      font=ctk.CTkFont("Segoe UI", 11),
-                      fg_color=CARD2, hover_color=BORDER, border_width=1, border_color=BORDER,
-                      command=self._cancel).pack(side="left")
+        self._cancel_btn = ctk.CTkButton(
+            row, text="Cancel", width=70, height=38, corner_radius=8,
+            font=ctk.CTkFont("Segoe UI", 11),
+            fg_color=CARD2, hover_color=BORDER, border_width=1, border_color=BORDER,
+            command=self._cancel)
+        self._cancel_btn.pack(side="left")
 
         self._msg = ctk.CTkLabel(self, text="", font=ctk.CTkFont("Segoe UI", 10),
                                   text_color=DANGER)
@@ -367,6 +370,13 @@ class _InlinePINForm(ctk.CTkFrame):
         self._entry.focus()
 
     def _verify(self):
+        import time
+        now = time.time()
+        if now < self._locked_until:
+            remaining = int(self._locked_until - now)
+            self._msg.configure(text=f"Locked for {remaining}s more.")
+            return
+
         self._attempts += 1
         if security.verify_pin(self._pin_var.get()):
             database.log_access("instructor_auth_ok", f"attempt={self._attempts}")
@@ -377,11 +387,30 @@ class _InlinePINForm(ctk.CTkFrame):
             self._entry.focus()
             self._msg.configure(
                 text=f"Incorrect PIN  ({self._attempts} attempt{'s' if self._attempts > 1 else ''})")
+
             if self._attempts >= 5:
+                import time as _t
+                self._locked_until = _t.time() + 30
                 self._entry.configure(state="disabled")
-                self._msg.configure(text="Too many attempts.")
+                self._cancel_btn.configure(state="disabled")   # cannot bypass via Cancel
+                self._msg.configure(text="Too many attempts. Locked for 30 seconds.")
+                self.after(30_000, self._reset_lockout)
+
+    def _reset_lockout(self):
+        self._locked_until = 0.0
+        self._attempts = 0
+        try:
+            self._entry.configure(state="normal")
+            self._cancel_btn.configure(state="normal")
+            self._msg.configure(text="")
+            self._entry.focus()
+        except Exception:
+            pass   # widget may have been destroyed
 
     def _cancel(self):
+        import time
+        if time.time() < self._locked_until:
+            return   # silently block cancel during lockout
         self._pin_var.set("")
         self._msg.configure(text="")
         self._attempts = 0

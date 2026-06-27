@@ -16,8 +16,12 @@ Each event that carries risk calls risk_cb(event_type, points).
 import threading
 import time
 import os
+import re
 import sys
+import logging
 from datetime import datetime
+
+logger = logging.getLogger("examguard.monitor")
 
 import pyperclip
 from PIL import ImageGrab
@@ -166,6 +170,7 @@ class MonitorEngine:
 
         self._last_window    = ""
         self._last_clipboard = ""
+        self._ks_lock        = threading.Lock()
         self._keystrokes     = 0
         self._backspaces     = 0
 
@@ -225,22 +230,26 @@ class MonitorEngine:
     def _on_key(self, key):
         if self._stop.is_set():
             return False
-        self._keystrokes += 1
-        try:
-            if key == keyboard.Key.backspace:
-                self._backspaces += 1
-        except Exception:
-            pass
+        with self._ks_lock:
+            self._keystrokes += 1
+            try:
+                if key == keyboard.Key.backspace:
+                    self._backspaces += 1
+            except Exception:
+                pass
 
     def _keystroke_flush_loop(self):
         while not self._stop.wait(KEYSTROKE_SAVE_INTERVAL):
             try:
-                database.update_keystroke_count(self.session_id, self._keystrokes)
+                with self._ks_lock:
+                    ks = self._keystrokes
+                    bs = self._backspaces
+                database.update_keystroke_count(self.session_id, ks)
                 database.log_event(
                     self.session_id, "keystroke_count",
-                    f"total={self._keystrokes} backspaces={self._backspaces}")
+                    f"total={ks} backspaces={bs}")
             except Exception as e:
-                print(f"[KsFlush] {e}")
+                logger.warning("[KsFlush] %s", e)
 
     # ── Window monitor ─────────────────────────────────────────
 
@@ -301,11 +310,12 @@ class MonitorEngine:
 
             # File clipboard (CF_HDROP)
             if _HAS_WIN32:
+                opened = False
                 try:
                     win32clipboard.OpenClipboard()
+                    opened = True
                     if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
                         files = win32clipboard.GetClipboardData(win32con.CF_HDROP)
-                        win32clipboard.CloseClipboard()
                         if files:
                             joined = " | ".join(files[:10])
                             if joined != self._last_clipboard:
@@ -316,15 +326,21 @@ class MonitorEngine:
                                 self._risk_cb("file_copy", RISK_W_FILE_COPY)
                                 if settings_manager.get("screenshot_on_file_copy", True):
                                     self._take_screenshot(label="FILE_COPY")
-                    else:
-                        win32clipboard.CloseClipboard()
                 except Exception:
-                    try: win32clipboard.CloseClipboard()
-                    except Exception: pass
+                    pass
+                finally:
+                    if opened:
+                        try:
+                            win32clipboard.CloseClipboard()
+                        except Exception:
+                            pass
 
     # ── Screenshot (event-driven only) ─────────────────────────
 
     def _take_screenshot(self, label: str = "") -> str | None:
+        # Sanitise label: only allow safe filename characters (Issue 6)
+        if label:
+            label = re.sub(r"[^A-Za-z0-9_-]", "", label)[:32]
         try:
             ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
             suffix   = f"_{label}" if label else ""
@@ -341,7 +357,7 @@ class MonitorEngine:
             database.log_event(self.session_id, "screenshot", filepath)
             return filepath
         except Exception as e:
-            print(f"[Screenshot] {e}")
+            logger.warning("[Screenshot] %s", e)
             return None
 
     # ── USB events ─────────────────────────────────────────────

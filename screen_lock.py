@@ -145,33 +145,58 @@ class ScreenLock:
                                text_color=_DANGER)
         err_lbl.pack(pady=(6, 0))
 
-        attempts = [0]
+        # Use nonlocal-capable vars — clean Python 3 approach (no mutable list)
+        attempt_count  = 0
+        locked_until   = 0.0  # epoch seconds
 
         def _verify(_event=None):
-            attempts[0] += 1
+            nonlocal attempt_count, locked_until
+            import time
+            now = time.time()
+
+            # Respect active lockout
+            if now < locked_until:
+                remaining = int(locked_until - now)
+                err_lbl.configure(text=f"Locked. Try again in {remaining}s.")
+                return
+
+            attempt_count += 1
             if security.verify_pin(pin_var.get()):
                 database.log_access("screen_unlock",
-                                    f"attempt={attempts[0]}")
+                                    f"attempt={attempt_count}")
                 self.unlock()
                 self._on_unlock()
             else:
                 database.log_access("screen_unlock_fail",
-                                    f"attempt={attempts[0]}")
+                                    f"attempt={attempt_count}")
                 err_lbl.configure(
-                    text=f"Incorrect PIN  ({attempts[0]} attempt{'s' if attempts[0]>1 else ''})")
+                    text=f"Incorrect PIN  "
+                         f"({attempt_count} attempt"
+                         f"{'s' if attempt_count > 1 else ''})")
                 pin_var.set("")
                 pin_entry.focus()
-                # Lock PIN entry after 5 bad attempts (extra security)
-                if attempts[0] >= 5:
-                    err_lbl.configure(
-                        text="Too many attempts. Wait 30 seconds.")
+
+                if attempt_count >= 5:
+                    import time as _t
+                    locked_until = _t.time() + 30
+                    err_lbl.configure(text="Too many attempts. Wait 30 seconds.")
                     pin_entry.configure(state="disabled")
-                    win.after(30_000, lambda: (
-                        pin_entry.configure(state="normal"),
-                        err_lbl.configure(text=""),
-                        attempts.__setitem__(0, 0),
-                        pin_entry.focus()
-                    ))
+
+                    def _reset_lockout():
+                        nonlocal attempt_count, locked_until
+                        attempt_count = 0
+                        locked_until  = 0.0
+                        try:
+                            pin_entry.configure(state="normal")
+                            err_lbl.configure(text="")
+                            pin_entry.focus()
+                        except Exception:
+                            pass  # window may have been destroyed before 30s
+
+                    try:
+                        win.after(30_000, _reset_lockout)
+                    except Exception:
+                        pass  # win already destroyed
 
         pin_entry.bind("<Return>", _verify)
 

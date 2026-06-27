@@ -36,12 +36,24 @@ logger = logging.getLogger("examguard.security")
 #  Machine-unique key derivation
 # ─────────────────────────────────────────────────────────────
 
-_PBKDF2_SALT = b"ExamGuard_PBKDF2_Salt_v4_2024"
+_PBKDF2_SALT_BASE = b"ExamGuard_PBKDF2_Salt_v4_2024"
 _ITERATIONS  = 300_000   # NIST recommended minimum for PBKDF2-SHA256
 _KEY_LOCK    = threading.Lock()
 _fernet: "Fernet | None" = None
 _hmac_key: "bytes | None" = None
 
+
+def _machine_salt() -> bytes:
+    """
+    Return a salt that is UNIQUE PER MACHINE by XOR-folding the machine GUID
+    into the base salt.  This prevents pre-computed rainbow tables that only
+    require knowledge of the hardcoded base salt.
+    """
+    guid = _get_machine_guid()   # forward-declared; OK — defined below
+    # Repeat/truncate guid bytes to match base salt length
+    base = _PBKDF2_SALT_BASE
+    guid_padded = (guid * ((len(base) // len(guid)) + 1))[:len(base)]
+    return bytes(a ^ b for a, b in zip(base, guid_padded))
 
 def _get_machine_guid() -> bytes:
     """Return a stable machine-unique identifier."""
@@ -104,10 +116,11 @@ def _try_save_key_to_keyring(key: bytes) -> bool:
 def _derive_key_from_machine() -> bytes:
     """Derive a stable Fernet-compatible key from the machine GUID."""
     machine_id = _get_machine_guid()
+    salt = _machine_salt()   # machine-unique salt: prevents rainbow tables
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=_PBKDF2_SALT,
+        salt=salt,
         iterations=_ITERATIONS,
     )
     return base64.urlsafe_b64encode(kdf.derive(machine_id))
@@ -240,21 +253,28 @@ def is_vault_accessible() -> bool:
 #  PIN management  (PBKDF2-hashed, never plaintext)
 # ─────────────────────────────────────────────────────────────
 
-_PIN_SALT    = b"ExamGuard_PIN_Salt_v4"
+_PIN_SALT_BASE = b"ExamGuard_PIN_Salt_v4"
 _PIN_ITERS   = 260_000
 _PIN_MIN_LEN = 4   # enforced at UI layer; absolute minimum here
 
 
+def _pin_salt() -> bytes:
+    """Machine-unique salt for PIN hashing (same XOR-fold technique as _machine_salt)."""
+    base = _PIN_SALT_BASE
+    guid = _get_machine_guid()
+    guid_padded = (guid * ((len(base) // max(len(guid), 1)) + 1))[:len(base)]
+    return bytes(a ^ b for a, b in zip(base, guid_padded))
+
 def hash_pin(pin: str) -> str:
     """
-    Hash a PIN with PBKDF2-SHA256.
+    Hash a PIN with PBKDF2-SHA256 using a machine-unique salt.
     Returns a prefixed string safe to store in settings.json.
     Format: "pbkdf2$<base64>" — the prefix distinguishes hashed from plaintext.
     """
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=_PIN_SALT,
+        salt=_pin_salt(),       # machine-unique: prevents cross-machine rainbow tables
         iterations=_PIN_ITERS,
     )
     raw = kdf.derive(pin.encode("utf-8"))

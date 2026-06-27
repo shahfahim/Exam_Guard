@@ -44,11 +44,14 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _execute_read(sql: str, params: tuple = ()) -> list:
-    """Execute a SELECT and return rows. Reads don't need the write lock."""
+    """
+    Execute a SELECT and return rows.
+    Reads in WAL mode are concurrent — NO write lock needed.
+    The connection object is thread-safe for reads in WAL mode.
+    """
     conn = _get_conn()
-    with _db_lock:
-        cur = conn.execute(sql, params)
-        return cur.fetchall()
+    cur = conn.execute(sql, params)   # WAL allows concurrent readers
+    return cur.fetchall()
 
 
 def _execute_write(sql: str, params: tuple = ()) -> int:
@@ -61,11 +64,23 @@ def _execute_write(sql: str, params: tuple = ()) -> int:
 
 
 def _execute_script(sql: str):
-    """Execute a multi-statement script (used only for schema creation)."""
+    """Execute a multi-statement script (acquires write lock)."""
     conn = _get_conn()
     with _db_lock:
-        conn.executescript(sql)
-        conn.commit()
+        _execute_script_unlocked_inner(conn, sql)
+
+
+def _execute_script_unlocked_inner(conn: "sqlite3.Connection", sql: str):
+    """Execute script WITHOUT acquiring the lock (caller must hold _db_lock)."""
+    conn.executescript(sql)
+    conn.commit()
+
+
+def _execute_script_unlocked(sql: str):
+    """Execute a multi-statement script. Caller must already hold _db_lock."""
+    conn = _get_conn()
+    conn.executescript(sql)
+    conn.commit()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -73,45 +88,48 @@ def _execute_script(sql: str):
 # ─────────────────────────────────────────────────────────────
 
 def initialize_db():
-    """Create tables if they don't exist. Safe to call multiple times."""
+    """Create tables if they don't exist. Thread-safe; safe to call multiple times."""
     global _init_done
     if _init_done:
         return
-    _execute_script("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_name     TEXT    NOT NULL,
-            student_id       TEXT    NOT NULL,
-            pc_hostname      TEXT,
-            start_time       TEXT,
-            end_time         TEXT,
-            total_keystrokes INTEGER DEFAULT 0,
-            session_hash     TEXT
-        );
+    with _db_lock:
+        if _init_done:   # double-checked locking inside the lock
+            return
+        _execute_script_unlocked("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_name     TEXT    NOT NULL,
+                student_id       TEXT    NOT NULL,
+                pc_hostname      TEXT,
+                start_time       TEXT,
+                end_time         TEXT,
+                total_keystrokes INTEGER DEFAULT 0,
+                session_hash     TEXT
+            );
 
-        CREATE TABLE IF NOT EXISTS events (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id       INTEGER NOT NULL,
-            event_type       TEXT    NOT NULL,
-            detail           TEXT,
-            timestamp        TEXT,
-            integrity_hash   TEXT,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        );
+            CREATE TABLE IF NOT EXISTS events (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id       INTEGER NOT NULL,
+                event_type       TEXT    NOT NULL,
+                detail           TEXT,
+                timestamp        TEXT,
+                integrity_hash   TEXT,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
 
-        CREATE TABLE IF NOT EXISTS access_log (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT    NOT NULL,
-            action    TEXT    NOT NULL,
-            detail    TEXT
-        );
+            CREATE TABLE IF NOT EXISTS access_log (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT    NOT NULL,
+                action    TEXT    NOT NULL,
+                detail    TEXT
+            );
 
-        CREATE INDEX IF NOT EXISTS idx_events_session
-            ON events(session_id, event_type);
-        CREATE INDEX IF NOT EXISTS idx_sessions_start
-            ON sessions(start_time DESC);
-    """)
-    _init_done = True
+            CREATE INDEX IF NOT EXISTS idx_events_session
+                ON events(session_id, event_type);
+            CREATE INDEX IF NOT EXISTS idx_sessions_start
+                ON sessions(start_time DESC);
+        """)
+        _init_done = True
 
 
 # ─────────────────────────────────────────────────────────────

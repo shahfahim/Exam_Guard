@@ -5,9 +5,17 @@
 # Never blocks the UI thread.
 
 import json
+import ssl
 import threading
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+try:
+    import certifi
+    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    # certifi not available; fall back to system CA store (still validates)
+    _SSL_CONTEXT = ssl.create_default_context()
 
 from version import VERSION, RELEASES_URL
 
@@ -37,7 +45,8 @@ def _check(callback) -> None:
                 "Accept": "application/vnd.github+json",
             },
         )
-        with urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+        with urlopen(req, timeout=_REQUEST_TIMEOUT,
+                     context=_SSL_CONTEXT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         latest_tag = data.get("tag_name", "").strip()
