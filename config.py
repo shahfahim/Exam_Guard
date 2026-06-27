@@ -7,15 +7,16 @@ import base64
 from app.paths import get_db_path, get_vault_dir, get_screenshots_dir
 
 # ── Access Control ────────────────────────────────────────────
-INSTRUCTOR_PIN = "1234"
+# PIN is managed via settings_manager; see security.py for hash management
 
 # ── App Encryption Key ────────────────────────────────────────
-APP_SECRET = b"ExamGuard-v2-SecretKey-2024-Stable"
+# REMOVED: Static APP_SECRET replaced by machine-unique key in security.py
+# The key is now derived from the Windows MachineGuid + PBKDF2, or stored
+# in Windows Credential Manager (keyring). See security._initialize_crypto().
 
 # ── Monitoring Intervals (seconds) ───────────────────────────
 WINDOW_CHECK_INTERVAL    = 0.5
 CLIPBOARD_CHECK_INTERVAL = 1.0
-SCREENSHOT_INTERVAL      = 120
 KEYSTROKE_SAVE_INTERVAL  = 30
 USB_CHECK_INTERVAL       = 1.5    # USB drive poll frequency
 

@@ -1,23 +1,83 @@
-# database.py — ExamGuard v3 — All DB operations
+# database.py — ExamGuard v4.1 — All DB operations
+
+"""
+PERFORMANCE FIXES (v4.1):
+  - Module-level SQLite connection with WAL mode (replaces per-call open/close)
+  - threading.Lock() guards all write operations
+  - Connection uses check_same_thread=False (safe with the write lock)
+  - Lazy initialization pattern for thread safety at startup
+"""
 
 import sqlite3
+import threading
+import logging
 from datetime import datetime
 
 import security
 from config import DB_FILE
 
+logger = logging.getLogger("examguard.database")
 
-def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_FILE)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+# ─────────────────────────────────────────────────────────────
+#  Connection pool (single persistent WAL connection + write lock)
+# ─────────────────────────────────────────────────────────────
 
+_db_conn:   "sqlite3.Connection | None" = None
+_db_lock    = threading.Lock()
+_init_done  = False
+
+
+def _get_conn() -> sqlite3.Connection:
+    """Return the module-level connection, creating it if needed."""
+    global _db_conn
+    if _db_conn is None:
+        with _db_lock:
+            if _db_conn is None:  # double-checked locking
+                conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("PRAGMA synchronous=NORMAL")  # safe with WAL
+                conn.execute("PRAGMA cache_size=-8000")    # 8MB page cache
+                _db_conn = conn
+    return _db_conn
+
+
+def _execute_read(sql: str, params: tuple = ()) -> list:
+    """Execute a SELECT and return rows. Reads don't need the write lock."""
+    conn = _get_conn()
+    with _db_lock:
+        cur = conn.execute(sql, params)
+        return cur.fetchall()
+
+
+def _execute_write(sql: str, params: tuple = ()) -> int:
+    """Execute an INSERT/UPDATE/DELETE. Returns lastrowid or rowcount."""
+    conn = _get_conn()
+    with _db_lock:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.lastrowid
+
+
+def _execute_script(sql: str):
+    """Execute a multi-statement script (used only for schema creation)."""
+    conn = _get_conn()
+    with _db_lock:
+        conn.executescript(sql)
+        conn.commit()
+
+
+# ─────────────────────────────────────────────────────────────
+#  Schema
+# ─────────────────────────────────────────────────────────────
 
 def initialize_db():
-    con = _conn()
-    con.executescript("""
+    """Create tables if they don't exist. Safe to call multiple times."""
+    global _init_done
+    if _init_done:
+        return
+    _execute_script("""
         CREATE TABLE IF NOT EXISTS sessions (
             id               INTEGER PRIMARY KEY AUTOINCREMENT,
             student_name     TEXT    NOT NULL,
@@ -45,19 +105,28 @@ def initialize_db():
             action    TEXT    NOT NULL,
             detail    TEXT
         );
+
+        CREATE INDEX IF NOT EXISTS idx_events_session
+            ON events(session_id, event_type);
+        CREATE INDEX IF NOT EXISTS idx_sessions_start
+            ON sessions(start_time DESC);
     """)
-    con.commit()
-    con.close()
+    _init_done = True
 
 
-# ── Encrypted event types ─────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  Encrypted event types
+# ─────────────────────────────────────────────────────────────
+
 _ENCRYPT_TYPES = {
     "clipboard_change", "screenshot", "file_copy",
     "usb_insert",       "file_access", "ide_preexisting",
 }
 
 
-# ── Sessions ──────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -67,73 +136,59 @@ def _session_canonical(name, sid, hostname, start) -> str:
     return f"{name}|{sid}|{hostname}|{start}"
 
 
+# ─────────────────────────────────────────────────────────────
+#  Sessions
+# ─────────────────────────────────────────────────────────────
+
 def create_session(student_name: str, student_id: str, pc_hostname: str) -> int:
     now = _now()
-    con = _conn()
-    cur = con.execute(
+    return _execute_write(
         "INSERT INTO sessions (student_name, student_id, pc_hostname, start_time, session_hash)"
         " VALUES (?, ?, ?, ?, ?)",
         (student_name, student_id, pc_hostname, now,
          security.sign(_session_canonical(student_name, student_id, pc_hostname, now)))
     )
-    sid = cur.lastrowid
-    con.commit()
-    con.close()
-    return sid
 
 
 def end_session(session_id: int):
-    con = _conn()
-    con.execute("UPDATE sessions SET end_time=? WHERE id=?", (_now(), session_id))
-    con.commit()
-    con.close()
+    _execute_write(
+        "UPDATE sessions SET end_time=? WHERE id=?",
+        (_now(), session_id)
+    )
 
 
 def update_keystroke_count(session_id: int, count: int):
-    con = _conn()
-    con.execute("UPDATE sessions SET total_keystrokes=? WHERE id=?", (count, session_id))
-    con.commit()
-    con.close()
+    _execute_write(
+        "UPDATE sessions SET total_keystrokes=? WHERE id=?",
+        (count, session_id)
+    )
 
 
-def get_session(session_id: int) -> dict | None:
-    con = _conn()
-    row = con.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-    con.close()
-    return dict(row) if row else None
+def get_session(session_id: int) -> "dict | None":
+    rows = _execute_read("SELECT * FROM sessions WHERE id=?", (session_id,))
+    return dict(rows[0]) if rows else None
 
 
-def get_all_sessions() -> list[dict]:
-    con = _conn()
-    rows = con.execute("SELECT * FROM sessions ORDER BY start_time DESC").fetchall()
-    con.close()
+def get_all_sessions() -> list:
+    rows = _execute_read("SELECT * FROM sessions ORDER BY start_time DESC")
     return [dict(r) for r in rows]
 
 
 def delete_session(session_id: int):
-    con = _conn()
-    con.execute("DELETE FROM events   WHERE session_id=?", (session_id,))
-    con.execute("DELETE FROM sessions WHERE id=?",         (session_id,))
-    con.commit()
-    con.close()
+    # Cascade deletes events automatically (FK ON DELETE CASCADE)
+    _execute_write("DELETE FROM sessions WHERE id=?", (session_id,))
 
 
 def delete_old_sessions(days: int = 30):
-    con = _conn()
-    con.execute(
-        "DELETE FROM events WHERE session_id IN "
-        "(SELECT id FROM sessions WHERE start_time < date('now',?))",
-        (f"-{days} days",))
-    con.execute(
-        "DELETE FROM sessions WHERE start_time < date('now',?)",
-        (f"-{days} days",))
-    con.commit()
-    con.close()
+    cutoff = f"-{days} days"
+    _execute_write(
+        "DELETE FROM sessions WHERE start_time < date('now', ?)",
+        (cutoff,)
+    )
 
 
-def get_sessions_with_stats() -> list[dict]:
-    con = _conn()
-    rows = con.execute("""
+def get_sessions_with_stats() -> list:
+    rows = _execute_read("""
         SELECT
             s.id, s.student_name, s.student_id, s.pc_hostname,
             s.start_time, s.end_time, s.total_keystrokes,
@@ -148,34 +203,32 @@ def get_sessions_with_stats() -> list[dict]:
         LEFT JOIN events e ON s.id = e.session_id
         GROUP BY s.id
         ORDER BY s.start_time DESC
-    """).fetchall()
-    con.close()
+    """)
     return [dict(r) for r in rows]
 
 
-# ── Events ────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  Events
+# ─────────────────────────────────────────────────────────────
 
 def log_event(session_id: int, event_type: str, detail: str):
-    now = _now()
-    stored = security.encrypt(detail) if event_type in _ENCRYPT_TYPES else detail
+    now     = _now()
+    stored  = security.encrypt(detail) if event_type in _ENCRYPT_TYPES else detail
     canonical = security.event_canonical(session_id, event_type, stored, now)
-    sig = security.sign(canonical)
-    con = _conn()
-    con.execute(
+    sig     = security.sign(canonical)
+    _execute_write(
         "INSERT INTO events (session_id, event_type, detail, timestamp, integrity_hash)"
         " VALUES (?, ?, ?, ?, ?)",
-        (session_id, event_type, stored, now, sig))
-    con.commit()
-    con.close()
+        (session_id, event_type, stored, now, sig)
+    )
 
 
 def get_events_for_session(session_id: int,
-                           decrypt_sensitive: bool = False) -> list[dict]:
-    con = _conn()
-    rows = con.execute(
+                            decrypt_sensitive: bool = False) -> list:
+    rows = _execute_read(
         "SELECT * FROM events WHERE session_id=? ORDER BY timestamp ASC",
-        (session_id,)).fetchall()
-    con.close()
+        (session_id,)
+    )
 
     result = []
     for row in rows:
@@ -194,29 +247,27 @@ def get_events_for_session(session_id: int,
 
 
 def get_event_counts(session_id: int) -> dict:
-    con = _conn()
-    rows = con.execute(
+    rows = _execute_read(
         "SELECT event_type, COUNT(*) as cnt FROM events WHERE session_id=? GROUP BY event_type",
-        (session_id,)).fetchall()
-    con.close()
+        (session_id,)
+    )
     return {r["event_type"]: r["cnt"] for r in rows}
 
 
-# ── Access log ────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  Access log
+# ─────────────────────────────────────────────────────────────
 
 def log_access(action: str, detail: str = ""):
-    con = _conn()
-    con.execute(
+    _execute_write(
         "INSERT INTO access_log (timestamp, action, detail) VALUES (?, ?, ?)",
-        (_now(), action, detail))
-    con.commit()
-    con.close()
+        (_now(), action, detail)
+    )
 
 
-def get_access_log(limit: int = 100) -> list[dict]:
-    con = _conn()
-    rows = con.execute(
+def get_access_log(limit: int = 200) -> list:
+    rows = _execute_read(
         "SELECT * FROM access_log ORDER BY timestamp DESC LIMIT ?",
-        (limit,)).fetchall()
-    con.close()
+        (limit,)
+    )
     return [dict(r) for r in rows]

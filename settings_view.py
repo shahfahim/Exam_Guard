@@ -65,8 +65,8 @@ class SettingsView(ctk.CTkFrame):
                                      text_color=DANGER)
 
         for row_label, key, ph in [
-            ("Current PIN",    "_old_pin",     "Current PIN"),
-            ("New PIN",        "_new_pin",     "At least 4 characters"),
+            ("Current PIN",    "_old_pin",     "Enter current PIN"),
+            ("New PIN",        "_new_pin",     "At least 6 characters"),
             ("Confirm New",    "_confirm_pin", "Repeat new PIN"),
         ]:
             r = ctk.CTkFrame(card, fg_color="transparent")
@@ -214,8 +214,8 @@ class SettingsView(ctk.CTkFrame):
 
         if not security.verify_pin(old):
             self._pin_msg.configure(text="Current PIN is incorrect.", text_color=DANGER); return
-        if len(new) < 4:
-            self._pin_msg.configure(text="New PIN must be at least 4 characters.", text_color=DANGER); return
+        if len(new) < 6:
+            self._pin_msg.configure(text="New PIN must be at least 6 characters.", text_color=DANGER); return
         if new != cnf:
             self._pin_msg.configure(text="New PINs do not match.", text_color=DANGER); return
 

@@ -42,6 +42,7 @@ class StudentView(ctk.CTkFrame):
         self._elapsed     = 0
         self._tick_job    = None
         self._risk_score  = 0
+        self._risk_lock   = threading.Lock()   # guards _risk_score mutations
         self._risk_events: list = []
         self._next_lock_at = settings_manager.get("risk_lock_threshold", 150)
 
@@ -253,8 +254,10 @@ class StudentView(ctk.CTkFrame):
     # ── Risk ───────────────────────────────────────────────────
 
     def _on_risk_event(self, event_type: str, points: int):
-        self._risk_score += points
-        self._risk_events.append((event_type, points))
+        """Called from any thread. Thread-safe risk score update."""
+        with self._risk_lock:
+            self._risk_score += points
+            self._risk_events.append((event_type, points))
         self.after(0, lambda et=event_type: self._update_risk(et))
 
     def _update_risk(self, event_type: str = ""):

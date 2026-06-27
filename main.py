@@ -41,6 +41,7 @@ class ExamGuardApp(ctk.CTk):
 
         database.initialize_db()
         security.ensure_vault()
+        security.ensure_pin_hashed()   # migrate plaintext PIN to PBKDF2 hash on first run
 
         self._page: str = ""
         self._authed: bool = False
@@ -245,7 +246,7 @@ class ExamGuardApp(ctk.CTk):
 
         ctk.CTkLabel(banner, text=f"\u2b06  Update {tag} available",
                      font=ctk.CTkFont("Segoe UI", 10, "bold"),
-                     text_color=INDIGO_GLOW if hasattr(globals(), 'INDIGO_GLOW') else ACCENT
+                     text_color=ACCENT
                      ).pack(side="left", padx=(10, 4), pady=6)
 
         ctk.CTkButton(banner, text="View", width=48, height=24, corner_radius=6,
@@ -440,6 +441,13 @@ class _PINOverlay(ctk.CTkFrame):
         self.bind("<Button-1>", lambda e: None)
 
     def _verify(self):
+        import time
+        now = time.time()
+        if hasattr(self, '_locked_until') and now < self._locked_until:
+            remaining = int(self._locked_until - now)
+            self._msg.configure(text=f"Locked. Wait {remaining}s.")
+            return
+
         self._attempts += 1
         if security.verify_pin(self._pin_var.get()):
             database.log_access("instructor_auth_ok", f"attempt={self._attempts}")
@@ -450,10 +458,19 @@ class _PINOverlay(ctk.CTkFrame):
             self._pin_var.set("")
             self._entry.focus()
             self._msg.configure(
-                text=f"Incorrect PIN  ({self._attempts} attempt{'s' if self._attempts > 1 else ''})")
+                text=f"Incorrect PIN  ({self._attempts} attempt{'s' if self._attempts > 1 else ''}")
             if self._attempts >= 5:
+                import time as _t
+                self._locked_until = _t.time() + 30
                 self._entry.configure(state="disabled")
-                self._msg.configure(text="Too many attempts.")
+                self._msg.configure(text="Too many attempts. Locked for 30 seconds.")
+                self.after(30_000, lambda: (
+                    self._entry.configure(state="normal"),
+                    self._msg.configure(text=""),
+                    setattr(self, "_attempts", 0),
+                    setattr(self, "_locked_until", 0),
+                    self._entry.focus()
+                ))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -463,13 +480,16 @@ class _PINOverlay(ctk.CTkFrame):
 class _LightboxOverlay(ctk.CTkFrame):
     def __init__(self, parent, paths: list, start_idx: int = 0):
         super().__init__(parent, fg_color="#05070A", corner_radius=0)
-        self._paths = [p for p in paths if os.path.exists(p)]
-        self._idx   = max(0, min(start_idx, len(self._paths) - 1))
-        self._photo = None
+        self._paths  = [p for p in paths if os.path.exists(p)]
+        self._idx    = max(0, min(start_idx, len(self._paths) - 1))
+        self._photo  = None
+        self._cache: dict = {}   # path+size → PhotoImage
         if not self._paths:
             self.destroy(); return
         self.bind("<Button-1>", lambda e: None)
         self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Left>",   lambda e: self._prev())
+        self.bind("<Right>",  lambda e: self._next())
         self._build()
         self._show()
         self.focus_set()
@@ -503,9 +523,19 @@ class _LightboxOverlay(ctk.CTkFrame):
         self.update_idletasks()
         w = max(self._img_lbl.winfo_width(), 800)
         h = max(self._img_lbl.winfo_height(), 500)
-        img = Image.open(path)
-        img.thumbnail((w, h), Image.LANCZOS)
-        self._photo = ImageTk.PhotoImage(img)
+        cache_key = f"{path}|{w}x{h}"
+        if cache_key not in self._cache:
+            try:
+                img = Image.open(path)
+                img.thumbnail((w, h), Image.LANCZOS)
+                self._cache[cache_key] = ImageTk.PhotoImage(img)
+                # Keep cache small — evict oldest if >20 entries
+                if len(self._cache) > 20:
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+            except Exception:
+                return   # Skip unreadable image
+        self._photo = self._cache[cache_key]
         self._img_lbl.configure(image=self._photo)
 
     def _prev(self): self._idx = (self._idx - 1) % len(self._paths); self._show()
